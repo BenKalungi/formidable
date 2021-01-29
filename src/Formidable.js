@@ -18,15 +18,19 @@ const DEFAULT_OPTIONS = {
   maxFields: 1000,
   maxFieldsSize: 20 * 1024 * 1024,
   maxFileSize: 200 * 1024 * 1024,
+  minFileSize: 1,
+  allowEmptyFiles: true,
   keepExtensions: false,
   encoding: 'utf-8',
   hash: false,
   uploadDir: os.tmpdir(),
   multiples: false,
   enabledPlugins: ['octetstream', 'querystring', 'multipart', 'json'],
+  fileWriteStreamHandler: null,
 };
 
-const File = require('./File');
+const PersistentFile = require('./PersistentFile');
+const VolatileFile = require('./VolatileFile');
 const DummyParser = require('./parsers/Dummy');
 const MultipartParser = require('./parsers/Multipart');
 
@@ -136,11 +140,13 @@ class IncomingForm extends EventEmitter {
       const fields = {};
       let mockFields = '';
       const files = {};
-      
+
       this.on('field', (name, value) => {
-        if (this.options.multiples) {
-          let mObj = { [name] : value };
-          mockFields = mockFields + '&' + qs.stringify(mObj);
+        if (this.options.multiples && 
+            (this.type === 'multipart' || this.type === 'urlencoded')
+            ) {
+          const mObj = { [name]: value };
+          mockFields = `${mockFields}&${qs.stringify(mObj)}`;
         } else {
           fields[name] = value;
         }
@@ -209,7 +215,7 @@ class IncomingForm extends EventEmitter {
     this._parseContentType();
 
     if (!this._parser) {
-      this._error(new Error('not parser found'));
+      this._error(new Error('no parser found'));
       return;
     }
 
@@ -293,11 +299,10 @@ class IncomingForm extends EventEmitter {
 
     this._flushing += 1;
 
-    const file = new File({
+    const file = this._newFile({
       path: this._rename(part),
-      name: part.filename,
-      type: part.mime,
-      hash: this.options.hash,
+      filename: part.filename,
+      mime: part.mime,
     });
     file.on('error', (err) => {
       this._error(err);
@@ -309,6 +314,14 @@ class IncomingForm extends EventEmitter {
 
     part.on('data', (buffer) => {
       this._fileSize += buffer.length;
+      if (this._fileSize < this.options.minFileSize) {
+        this._error(
+          new Error(
+            `options.minFileSize (${this.options.minFileSize} bytes) inferior, received ${this._fileSize} bytes of file data`,
+          ),
+        );
+        return;
+      }
       if (this._fileSize > this.options.maxFileSize) {
         this._error(
           new Error(
@@ -327,6 +340,15 @@ class IncomingForm extends EventEmitter {
     });
 
     part.on('end', () => {
+      if (!this.options.allowEmptyFiles && this._fileSize === 0) {
+        this._error(
+          new Error(
+            `options.allowEmptyFiles is false, file size should be greather than 0`,
+          ),
+        );
+        return;
+      }
+
       file.end(() => {
         this._flushing -= 1;
         this.emit('file', part.name, file);
@@ -401,7 +423,7 @@ class IncomingForm extends EventEmitter {
 
     if (Array.isArray(this.openedFiles)) {
       this.openedFiles.forEach((file) => {
-        file._writeStream.destroy();
+        file.destroy();
         setTimeout(fs.unlink, 0, file.path, () => {});
       });
     }
@@ -422,6 +444,22 @@ class IncomingForm extends EventEmitter {
 
   _newParser() {
     return new MultipartParser(this.options);
+  }
+
+  _newFile({ path: filePath, filename: name, mime: type }) {
+    return this.options.fileWriteStreamHandler
+      ? new VolatileFile({
+          name,
+          type,
+          createFileWriteStream: this.options.fileWriteStreamHandler,
+          hash: this.options.hash,
+        })
+      : new PersistentFile({
+          path: filePath,
+          name,
+          type,
+          hash: this.options.hash,
+        });
   }
 
   _getFileName(headerValue) {

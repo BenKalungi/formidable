@@ -64,7 +64,8 @@ _**Note: v2 is coming soon!**_
 ## Highlights
 
 - [Fast (~900-2500 mb/sec)](#benchmarks) & streaming multipart parser
-- Automatically writing file uploads to disk (soon optionally)
+- Automatically writing file uploads to disk (optional, see
+  [`options.fileWriteStreamHandler`](#options))
 - [Plugins API](#useplugin-plugin) - allowing custom parsers and plugins
 - Low memory footprint
 - Graceful error handling
@@ -112,7 +113,7 @@ const server = http.createServer((req, res) => {
     const form = formidable({ multiples: true });
 
     form.parse(req, (err, fields, files) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ fields, files }, null, 2));
     });
 
@@ -120,7 +121,7 @@ const server = http.createServer((req, res) => {
   }
 
   // show a file upload form
-  res.writeHead(200, { 'content-type': 'text/html' });
+  res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(`
     <h2>With Node.js <code>"http"</code> module</h2>
     <form action="/api/upload" enctype="multipart/form-data" method="post">
@@ -205,7 +206,7 @@ app.use(async (ctx, next) => {
   if (ctx.url === '/api/upload' && ctx.method.toLowerCase() === 'post') {
     const form = formidable({ multiples: true });
 
-    // not very elegant, but that's for now if you don't want touse `koa-better-body`
+    // not very elegant, but that's for now if you don't want to use `koa-better-body`
     // or other middlewares.
     await new Promise((resolve, reject) => {
       form.parse(ctx.req, (err, fields, files) => {
@@ -310,15 +311,19 @@ const form = new Formidable(options);
 
 ### Options
 
-See it's defaults in [src/Formidable.js](./src/Formidable.js#L14-L22) (the
-`DEFAULT_OPTIONS` constant).
+See it's defaults in [src/Formidable.js DEFAULT_OPTIONS](./src/Formidable.js)
+(the `DEFAULT_OPTIONS` constant).
 
 - `options.encoding` **{string}** - default `'utf-8'`; sets encoding for
   incoming form fields,
 - `options.uploadDir` **{string}** - default `os.tmpdir()`; the directory for
-  placing file uploads in. You can move them later by using `fs.rename()`
+  placing file uploads in. You can move them later by using `fs.rename()`.
 - `options.keepExtensions` **{boolean}** - default `false`; to include the
   extensions of the original files or not
+- `options.allowEmptyFiles` **{boolean}** - default `true`; allow upload empty
+  files
+- `options.minFileSize` **{number}** - default `1` (1byte); the minium size of
+  uploaded file.
 - `options.maxFileSize` **{number}** - default `200 * 1024 * 1024` (200mb);
   limit the size of uploaded file.
 - `options.maxFields` **{number}** - default `1000`; limit the number of fields
@@ -326,10 +331,20 @@ See it's defaults in [src/Formidable.js](./src/Formidable.js#L14-L22) (the
 - `options.maxFieldsSize` **{number}** - default `20 * 1024 * 1024` (20mb);
   limit the amount of memory all fields together (except files) can allocate in
   bytes.
-- `options.hash` **{boolean}** - default `false`; include checksums calculated
+- `options.hash` **{string | false}** - default `false`; include checksums calculated
   for incoming files, set this to some hash algorithm, see
   [crypto.createHash](https://nodejs.org/api/crypto.html#crypto_crypto_createhash_algorithm_options)
   for available algorithms
+- `options.fileWriteStreamHandler` **{function}** - default `null`, which by
+  default writes to host machine file system every file parsed; The function
+  should return an instance of a
+  [Writable stream](https://nodejs.org/api/stream.html#stream_class_stream_writable)
+  that will receive the uploaded file data. With this option, you can have any
+  custom behavior regarding where the uploaded file data will be streamed for.
+  If you are looking to write the file uploaded in other types of cloud storages
+  (AWS S3, Azure blob storage, Google cloud storage) or private file storage,
+  this is the option you're looking for. When this option is defined the default
+  behavior of writing the file in the host machine file system is lost.
 - `options.multiples` **{boolean}** - default `false`; when you call the
   `.parse` method, the `files` argument (of the callback) will contain arrays of
   files for inputs which submit multiple files using the HTML5 `multiple`
@@ -370,6 +385,41 @@ multipart stream. Doing so will disable any `'field'` / `'file'` events
 processing which would occur otherwise, making you fully responsible for
 handling the processing.
 
+About `uploadDir`, given the following directory structure 
+```
+project-name
+├── src
+│   └── server.js
+│       
+└── uploads
+    └── image.jpg
+```
+
+`__dirname` would be the same directory as the source file itself (src)
+
+
+```js
+ `${__dirname}/../uploads`
+```
+
+to put files in uploads.
+
+Omitting `__dirname` would make the path relative to the current working directory. This would be the same if server.js is launched from src but not project-name.
+
+
+`null` will use default which is `os.tmpdir()`
+
+Note: If the directory does not exist, the uploaded files are __silently discarded__. To make sure it exists:
+
+```js
+import {createNecessaryDirectoriesSync} from "filesac";
+
+
+const uploadPath = `${__dirname}/../uploads`;
+createNecessaryDirectoriesSync(`${uploadPath}/x`);
+```
+
+
 In the example below, we listen on couple of events and direct them to the
 `data` listener, so you can do whatever you choose there, based on whether its
 before the file been emitted, the header value, the header name, on field, on
@@ -381,12 +431,12 @@ later.
 ```js
 form.once('error', console.error);
 
-form.on('fileBegin', (filename, file) => {
-  form.emit('data', { name: 'fileBegin', filename, value: file });
+form.on('fileBegin', (formname, file) => {
+  form.emit('data', { name: 'fileBegin', formname, value: file });
 });
 
-form.on('file', (filename, file) => {
-  form.emit('data', { name: 'file', key: filename, value: file });
+form.on('file', (formname, file) => {
+  form.emit('data', { name: 'file', formname, value: file });
 });
 
 form.on('field', (fieldName, fieldValue) => {
@@ -398,7 +448,7 @@ form.once('end', () => {
 });
 
 // If you want to customize whatever you want...
-form.on('data', ({ name, key, value, buffer, start, end, ...more }) => {
+form.on('data', ({ name, key, value, buffer, start, end, formname, ...more }) => {
   if (name === 'partBegin') {
   }
   if (name === 'partData') {
@@ -416,10 +466,10 @@ form.on('data', ({ name, key, value, buffer, start, end, ...more }) => {
     console.log('field value:', value);
   }
   if (name === 'file') {
-    console.log('file:', key, value);
+    console.log('file:', formname, value);
   }
   if (name === 'fileBegin') {
-    console.log('fileBegin:', key, value);
+    console.log('fileBegin:', formname, value);
   }
 });
 ```
@@ -578,7 +628,13 @@ you want to stream the file to somewhere else while buffering the upload on the
 file system.
 
 ```js
-form.on('fileBegin', (name, file) => {});
+form.on('fileBegin', (formName, file) => {
+    // accessible here 
+    // formName the name in the form (<input name="thisname" type="file">)
+    // file.name (http filename)
+    // file.path default pathnme as per options.uploadDir and options.filename
+    // file.path = CUSTOM_PATH // to change the final path
+});
 ```
 
 #### `'file'`
@@ -587,7 +643,11 @@ Emitted whenever a field / file pair has been received. `file` is an instance of
 `File`.
 
 ```js
-form.on('file', (name, file) => {});
+form.on('file', (formname, file) => {
+    // same as fileBegin, except
+    // it is too late to change file.path
+    // file.hash is available if options.hash was used
+});
 ```
 
 #### `'error'`
@@ -632,8 +692,8 @@ form.on('end', () => {});
 
 If the documentation is unclear or has a typo, please click on the page's `Edit`
 button (pencil icon) and suggest a correction. If you would like to help us fix
-a bug or add a new feature, please check our
-[Contributing Guide](./CONTRIBUTING.md). Pull requests are welcome!
+a bug or add a new feature, please check our [Contributing
+Guide][contributing-url]. Pull requests are welcome!
 
 Thanks goes to these wonderful people
 ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -671,6 +731,13 @@ Thanks goes to these wonderful people
 <!-- prettier-ignore-end -->
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
+
+From a [Felix blog post](https://felixge.de/2013/03/11/the-pull-request-hack/):
+
+- [Sven Lito](https://github.com/svnlto) for fixing bugs and merging patches
+- [egirshov](https://github.com/egirshov) for contributing many improvements to the node-formidable multipart parser
+- [Andrew Kelley](https://github.com/superjoe30) for also helping with fixing bugs and making improvements
+- [Mike Frey](https://github.com/mikefrey) for contributing JSON support
 
 ## License
 
@@ -710,8 +777,8 @@ Formidable is licensed under the [MIT License][license-url].
 [ccommits-url]: https://conventionalcommits.org/
 [ccommits-img]: https://badgen.net/badge/conventional%20commits/v1.0.0/green?cache=300
 
-[contributing-url]: https://github.com/node-formidable/formidable/blob/master/CONTRIBUTING.md
-[code_of_conduct-url]: https://github.com/node-formidable/formidable/blob/master/CODE_OF_CONDUCT.md
+[contributing-url]: https://github.com/node-formidable/.github/blob/master/CONTRIBUTING.md
+[code_of_conduct-url]: https://github.com/node-formidable/.github/blob/master/CODE_OF_CONDUCT.md
 
 [open-issue-url]: https://github.com/node-formidable/formidable/issues/new
 
